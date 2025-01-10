@@ -48,8 +48,10 @@ type model struct {
 	err        error
 	windowSize tea.WindowSizeMsg
 	styles     styles
-	offset     int // for scrolling
-	height     int // visible height
+	offset     int    // for scrolling
+	height     int    // visible height
+	width      int    // screen width
+	basePath   string // initial path to trim from display
 }
 
 type styles struct {
@@ -140,7 +142,12 @@ func scanDirectory(path string) (Items, Items, error) {
 }
 
 func initialModel(path string) (model, error) {
-	files, folders, err := scanDirectory(path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return model{}, err
+	}
+
+	files, folders, err := scanDirectory(absPath)
 	if err != nil {
 		return model{}, err
 	}
@@ -150,7 +157,9 @@ func initialModel(path string) (model, error) {
 		folders:  folders,
 		viewMode: "files",
 		styles:   initStyles(),
-		height:   10, // Default height, will be updated on WindowSizeMsg
+		height:   10,  // Default height, will be updated on WindowSizeMsg
+		width:    100, // Default width, will be updated on WindowSizeMsg
+		basePath: absPath,
 	}, nil
 }
 
@@ -274,6 +283,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// truncateFromStart truncates a string from the beginning, keeping the end visible
+func truncateFromStart(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return "..." + s[len(s)-(maxLen-3):]
+}
+
+// getRelativePath returns path relative to basePath
+func getRelativePath(fullPath, basePath string) string {
+	rel, err := filepath.Rel(basePath, fullPath)
+	if err != nil {
+		return fullPath
+	}
+	return rel
+}
+
 func (m model) View() string {
 	if m.err != nil {
 		return m.styles.errorText.Render(fmt.Sprintf("Error: %v", m.err))
@@ -295,12 +321,18 @@ func (m model) View() string {
 	)
 	s.WriteString(m.styles.title.Render(title) + "\n\n")
 
+	// Calculate widths based on screen size
+	sizeWidth := 12  // Fixed width for size column
+	selectWidth := 3 // Fixed width for selection indicator
+	nameWidth := min(40, (m.width-sizeWidth-selectWidth)/3)
+	pathWidth := m.width - sizeWidth - nameWidth - selectWidth - 5 // -5 for spacing
+
 	// Header
-	header := fmt.Sprintf("%-15s %-30s %-20s %s",
-		"SIZE",
-		"NAME",
-		"DIRECTORY",
-		"SELECTED",
+	header := fmt.Sprintf("%-*s %-*s %-*s %s",
+		sizeWidth, "SIZE",
+		nameWidth, "NAME",
+		pathWidth, "PATH",
+		"SEL",
 	)
 	s.WriteString(m.styles.header.Render(header) + "\n")
 
@@ -341,16 +373,16 @@ func (m model) View() string {
 	// Items
 	for i, item := range visibleItems {
 		name := filepath.Base(item.Path)
-		dir := filepath.Base(filepath.Dir(item.Path))
+		relPath := getRelativePath(filepath.Dir(item.Path), m.basePath)
 		selected := " "
 		if item.IsSelected {
 			selected = "✓"
 		}
 
-		line := fmt.Sprintf("%-15s %-30s %-20s [%s]",
-			m.styles.size.Render(humanize.Bytes(uint64(item.Size))),
-			truncateString(name, 29),
-			truncateString(dir, 19),
+		line := fmt.Sprintf("%-*s %-*s %-*s [%s]",
+			sizeWidth, m.styles.size.Render(humanize.Bytes(uint64(item.Size))),
+			nameWidth, truncateString(name, nameWidth),
+			pathWidth, truncateFromStart(relPath, pathWidth),
 			selected,
 		)
 
