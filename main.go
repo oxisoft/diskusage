@@ -20,11 +20,35 @@ func min(a, b int) int {
 	return b
 }
 
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// truncateFromStart truncates a string from the beginning, keeping the end visible
+func truncateFromStart(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return "..." + s[len(s)-(maxLen-3):]
+}
+
+// getRelativePath returns path relative to basePath
+func getRelativePath(fullPath, basePath string) string {
+	rel, err := filepath.Rel(basePath, fullPath)
+	if err != nil {
+		return fullPath
+	}
+	return rel
 }
 
 type Item struct {
@@ -55,14 +79,15 @@ type model struct {
 }
 
 type styles struct {
-	title       lipgloss.Style
-	header      lipgloss.Style
-	selected    lipgloss.Style
-	normal      lipgloss.Style
-	size        lipgloss.Style
-	helpText    lipgloss.Style
-	errorText   lipgloss.Style
-	confirmText lipgloss.Style
+	title         lipgloss.Style
+	header        lipgloss.Style
+	selected      lipgloss.Style
+	normal        lipgloss.Style
+	size          lipgloss.Style
+	helpText      lipgloss.Style
+	errorText     lipgloss.Style
+	confirmText   lipgloss.Style
+	selectionMark lipgloss.Style
 }
 
 func initStyles() styles {
@@ -92,6 +117,8 @@ func initStyles() styles {
 			Foreground(lipgloss.Color("#FFF")).
 			Background(lipgloss.Color("#da3633")).
 			Padding(0, 1),
+		selectionMark: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#ff0000")),
 	}
 }
 
@@ -176,7 +203,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
-				// Scroll up if cursor goes above viewport
 				if m.cursor < m.offset {
 					m.offset = m.cursor
 				}
@@ -188,8 +214,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.cursor < len(items)-1 {
 				m.cursor++
-				// Scroll down if cursor goes below viewport
-				if m.cursor >= m.offset+m.height-4 { // -4 for header and footer
+				if m.cursor >= m.offset+m.height-4 {
 					m.offset = m.cursor - m.height + 5
 				}
 			}
@@ -240,16 +265,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			m.offset = 0
 		case " ":
-			items := m.files
-			if m.viewMode == "folders" {
-				items = m.folders
-			}
-			if len(items) > 0 && m.cursor < len(items) {
-				if m.viewMode == "files" {
-					m.files[m.cursor].IsSelected = !m.files[m.cursor].IsSelected
-				} else {
-					m.folders[m.cursor].IsSelected = !m.folders[m.cursor].IsSelected
-				}
+			if m.viewMode == "files" && m.cursor < len(m.files) {
+				m.files[m.cursor].IsSelected = !m.files[m.cursor].IsSelected
+			} else if m.viewMode == "folders" && m.cursor < len(m.folders) {
+				m.folders[m.cursor].IsSelected = !m.folders[m.cursor].IsSelected
 			}
 		case "d":
 			m.confirming = true
@@ -279,25 +298,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.windowSize = msg
 		m.height = msg.Height
+		m.width = msg.Width
 	}
 	return m, nil
-}
-
-// truncateFromStart truncates a string from the beginning, keeping the end visible
-func truncateFromStart(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return "..." + s[len(s)-(maxLen-3):]
-}
-
-// getRelativePath returns path relative to basePath
-func getRelativePath(fullPath, basePath string) string {
-	rel, err := filepath.Rel(basePath, fullPath)
-	if err != nil {
-		return fullPath
-	}
-	return rel
 }
 
 func (m model) View() string {
@@ -322,17 +325,25 @@ func (m model) View() string {
 	s.WriteString(m.styles.title.Render(title) + "\n\n")
 
 	// Calculate widths based on screen size
-	sizeWidth := 12  // Fixed width for size column
-	selectWidth := 3 // Fixed width for selection indicator
-	nameWidth := min(40, (m.width-sizeWidth-selectWidth)/3)
-	pathWidth := m.width - sizeWidth - nameWidth - selectWidth - 5 // -5 for spacing
+	selectWidth := 3                                                  // Width for selection indicator (including brackets) [*]
+	sizeWidth := 8                                                    // Fixed width for size column
+	minPathWidth := 30                                                // Minimum width for path
+	nameWidth := m.width - sizeWidth - selectWidth - minPathWidth - 6 // -6 for spacing
+
+	// If we still have too much space, limit name column to something reasonable
+	if nameWidth > 100 {
+		nameWidth = 100
+	}
+
+	// Path gets whatever is left
+	pathWidth := m.width - sizeWidth - nameWidth - selectWidth - 6
 
 	// Header
-	header := fmt.Sprintf("%-*s %-*s %-*s %s",
+	header := fmt.Sprintf("[%s] %*s %-*s %s",
+		" ",
 		sizeWidth, "SIZE",
 		nameWidth, "NAME",
-		pathWidth, "PATH",
-		"SEL",
+		"PATH",
 	)
 	s.WriteString(m.styles.header.Render(header) + "\n")
 
@@ -343,13 +354,13 @@ func (m model) View() string {
 		return s.String()
 	}
 
-	// Calculate visible range
-	visibleHeight := m.height - 4 // -4 for header and footer
+	// Calculate visible range and items
+	visibleHeight := m.height - 4
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
 
-	// Ensure offset is within bounds
+	// Update offset bounds
 	if m.offset < 0 {
 		m.offset = 0
 	}
@@ -361,13 +372,11 @@ func (m model) View() string {
 		m.offset = maxOffset
 	}
 
-	// Calculate slice bounds
 	endIdx := m.offset + visibleHeight
 	if endIdx > len(items) {
 		endIdx = len(items)
 	}
 
-	// Get visible items
 	visibleItems := items[m.offset:endIdx]
 
 	// Items
@@ -376,14 +385,15 @@ func (m model) View() string {
 		relPath := getRelativePath(filepath.Dir(item.Path), m.basePath)
 		selected := " "
 		if item.IsSelected {
-			selected = "✓"
+			selected = m.styles.selectionMark.Render("*")
 		}
 
-		line := fmt.Sprintf("%-*s %-*s %-*s [%s]",
+		// Format line with selection at start
+		line := fmt.Sprintf("[%s] %*s %-*s %s",
+			selected,
 			sizeWidth, m.styles.size.Render(humanize.Bytes(uint64(item.Size))),
 			nameWidth, truncateString(name, nameWidth),
-			pathWidth, truncateFromStart(relPath, pathWidth),
-			selected,
+			truncateFromStart(relPath, pathWidth),
 		)
 
 		if i+m.offset == m.cursor {
@@ -404,13 +414,6 @@ func (m model) View() string {
 	s.WriteString(m.styles.helpText.Render(help))
 
 	return s.String()
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func main() {
